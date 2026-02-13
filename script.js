@@ -1,104 +1,151 @@
-// =================== CONFIG (match your bin calibration) ===================
-const EMPTY_DIST_CM = 60; // distance when bin is empty
-const FULL_DIST_CM = 10; // distance when bin is full
-const FULL_THRESHOLD_PERCENT = 80; // alert threshold
-const DISTANCE_LOG_INTERVAL_MS = 20000; // 20 seconds
+/* ============================================================
+   SMART BIN DASHBOARD - OUR DATAFLOW
+   ------------------------------------------------------------
+   here it:
+   - Fetches live data from Adafruit IO (ESP32 cloud)
+   - Updates UI (distance, percent, status)
+   - Sends manual sorting commands to ESP32
+   - Maintains logs and chart
+   ============================================================ */
 
-// =================== STATE ===================
+/* ============================================================
+   1. ADAFRUIT CLOUD CONFIGURATION
+   ------------------------------------------------------------
+   These values connect the dashboard to Adafruit IO.
+   Keep in mind that in real world cases the key should be hidden in backend.
+   ============================================================ */
+
+const AIO_USERNAME = "username";
+const AIO_KEY = "Pass";
+const AIO_BASE = `https://io.adafruit.com/api/v2/${AIO_USERNAME}/feeds`;
+
+let lastDataTimestamp = 0; // used to detect stale data (future improvement)
+
+/* ============================================================
+      2. OUR BIN CALIBRATION & SYSTEM THRESHOLDS
+      ------------------------------------------------------------
+      These values MUST match the ESP32 calibration.
+      If we change bin size physically, we update these.
+      ============================================================ */
+
+const EMPTY_DIST_CM = 60;
+const FULL_DIST_CM = 10;
+const FULL_THRESHOLD_PERCENT = 95;
+
+/* ============================================================
+      3. DASHBOARD STATE (Frontend Memory)
+      ------------------------------------------------------------
+      These variables exist only in browser memory.
+      They reset when page reloads.
+      ============================================================ */
+
 let totalSorted = 0;
 let lastSorted = "None";
 
-let distanceNow = 20; // mock initial
-let distanceLog = [];
+let distanceNow = 0;
 let sortLog = [];
 let currentFilter = "all";
 
-// =================== DOM ===================
+/* ============================================================
+      4. DOM REFERENCES
+      ------------------------------------------------------------
+      Cache all HTML elements once to avoid repeated lookups.
+      ============================================================ */
+
 const elDistanceCm = document.getElementById("distanceCm");
 const elDistanceCm2 = document.getElementById("distanceCm2");
 const elFillPercent = document.getElementById("fillPercent");
 const elBarFill = document.getElementById("barFill");
+
 const elSystemStatusText = document.getElementById("systemStatusText");
 const elSystemStatusSub = document.getElementById("systemStatusSub");
 const elStatusBadge = document.getElementById("statusBadge");
+
 const elLastSorted = document.getElementById("lastSorted");
 const elTotalSorted = document.getElementById("totalSorted");
-const elDistanceLog = document.getElementById("distanceLog");
 const elSortLog = document.getElementById("sortLog");
 
+/* ============================================================
+      5. MODAL FOR MANUAL SORTING 
+      ============================================================ */
+
 const modal = document.getElementById("sortModal");
+
 document.getElementById("openSort").onclick = () =>
   (modal.style.display = "flex");
+
 document.getElementById("closeSort").onclick = () =>
   (modal.style.display = "none");
+
+// Close modal if background clicked
 modal.addEventListener("click", (e) => {
   if (e.target === modal) modal.style.display = "none";
 });
 
+// Manual sort options
 document.querySelectorAll(".opt").forEach((btn) => {
   btn.addEventListener("click", () => {
-    const type = btn.dataset.type;
-    handleManualSort(type);
+    handleManualSort(btn.dataset.type);
     modal.style.display = "none";
   });
 });
 
+// Log filter chips
 document.querySelectorAll(".chip").forEach((chip) => {
   chip.addEventListener("click", () => {
     document
       .querySelectorAll(".chip")
       .forEach((c) => c.classList.remove("active"));
+
     chip.classList.add("active");
     currentFilter = chip.dataset.filter;
     renderSortLog();
   });
 });
 
-// =================== HELPERS ===================
+/* ============================================================
+      6. HELPER FUNCTIONS
+      ============================================================ */
+
+// Ensures value stays within range
 function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
 }
 
+// Convert distance (cm) → fill percentage (0–100%)
 function distanceToPercent(distanceCm) {
-  // 0% when >= empty distance, 100% when <= full distance
   if (distanceCm >= EMPTY_DIST_CM) return 0;
   if (distanceCm <= FULL_DIST_CM) return 100;
+
   const pct =
     ((EMPTY_DIST_CM - distanceCm) / (EMPTY_DIST_CM - FULL_DIST_CM)) * 100;
+
   return clamp(Math.round(pct), 0, 100);
 }
 
-function statusFromPercent(pct) {
-  if (pct >= FULL_THRESHOLD_PERCENT) return "FULL";
-  if (pct >= 60) return "WARNING";
-  return "OPERATIONAL";
-}
-
-function colorizeStatus(status) {
-  // update badge + top status text (minimal but clear)
+// Updates badge + status message visually
+function updateStatusUI(status) {
   elStatusBadge.textContent = status;
 
   if (status === "FULL") {
     elStatusBadge.style.background = "var(--danger-2)";
-    elStatusBadge.style.borderColor = "#ffd0d0";
     elStatusBadge.style.color = "var(--danger)";
     elSystemStatusText.textContent = "Full";
     elSystemStatusSub.textContent = "Bin capacity exceeded threshold";
   } else if (status === "WARNING") {
     elStatusBadge.style.background = "var(--warn-2)";
-    elStatusBadge.style.borderColor = "#ffe8b0";
     elStatusBadge.style.color = "#b45309";
     elSystemStatusText.textContent = "Warning";
-    elSystemStatusSub.textContent = "Bin approaching full capacity";
+    elSystemStatusSub.textContent = "Sensor or data issue detected";
   } else {
     elStatusBadge.style.background = "var(--green-2)";
-    elStatusBadge.style.borderColor = "#d7efe6";
     elStatusBadge.style.color = "#1f5f48";
     elSystemStatusText.textContent = "Operational";
     elSystemStatusSub.textContent = "Bin operating normally";
   }
 }
 
+// Returns formatted time (HH:MM)
 function nowTime() {
   return new Date().toLocaleTimeString([], {
     hour: "2-digit",
@@ -106,74 +153,68 @@ function nowTime() {
   });
 }
 
-// =================== RENDER ===================
-function renderMetrics() {
+/* ============================================================
+      7. RENDER FUNCTIONS
+      ============================================================ */
+
+function renderMetrics(percent, sensorOk) {
   elDistanceCm.textContent = distanceNow;
   elDistanceCm2.textContent = distanceNow;
 
-  const pct = distanceToPercent(distanceNow);
-  elFillPercent.textContent = pct;
-  elBarFill.style.width = `${pct}%`;
-
-  const status = statusFromPercent(pct);
-  colorizeStatus(status);
+  elFillPercent.textContent = percent;
+  elBarFill.style.width = `${percent}%`;
 
   elLastSorted.textContent = lastSorted;
   elTotalSorted.textContent = totalSorted;
-}
 
-function renderDistanceLog() {
-  elDistanceLog.innerHTML = "";
-  distanceLog.slice(0, 10).forEach((entry) => {
-    const li = document.createElement("li");
-    li.innerHTML = `
-      <div class="li-left">
-        <span class="tag">${entry.percent}%</span>
-        <span>${entry.distance} cm</span>
-      </div>
-      <span class="time">${entry.time}</span>
-    `;
-    elDistanceLog.appendChild(li);
-  });
+  // ---- Status Logic ----
+  let status = "OPERATIONAL";
+
+  if (!sensorOk) {
+    status = "WARNING";
+  } else if (percent >= FULL_THRESHOLD_PERCENT) {
+    status = "FULL";
+  }
+
+  updateStatusUI(status);
 }
 
 function renderSortLog() {
   elSortLog.innerHTML = "";
+
   const filtered = sortLog.filter((e) =>
-    currentFilter === "all" ? true : e.type === currentFilter,
+    currentFilter === "all" ? true : e.type === currentFilter
   );
 
   if (filtered.length === 0) {
-    const li = document.createElement("li");
-    li.innerHTML = `<div class="li-left"><span class="tag">—</span><span>No sorting activity yet</span></div><span class="time">${nowTime()}</span>`;
-    elSortLog.appendChild(li);
+    elSortLog.innerHTML = `<li><div class="li-left">
+           <span class="tag">—</span>
+           <span>No sorting activity yet</span>
+          </div>
+          <span class="time">${nowTime()}</span></li>`;
     return;
   }
 
   filtered.slice(0, 12).forEach((entry) => {
     const li = document.createElement("li");
-    const label = entry.type.toUpperCase();
-    const tagColor =
-      entry.type === "plastic"
-        ? "background:#e7f3ff;border-color:#d7e9ff"
-        : entry.type === "paper"
-          ? "background:#fff4da;border-color:#ffe8b0"
-          : "background:#e7f7f1;border-color:#cdeee2";
 
     li.innerHTML = `
-      <div class="li-left">
-        <span class="tag" style="${tagColor}">${label}</span>
-        <span>Sorted (manual)</span>
-      </div>
-      <span class="time">${entry.time}</span>
-    `;
+         <div class="li-left">
+           <span class="tag">${entry.type.toUpperCase()}</span>
+           <span>Sorted (manual)</span>
+         </div>
+         <span class="time">${entry.time}</span>
+       `;
+
     elSortLog.appendChild(li);
   });
 }
 
-// =================== CHART ===================
-const ctx = document.getElementById("distanceChart");
-const chart = new Chart(ctx, {
+/* ============================================================
+      8. CHART (FULLNESS OVER TIME)
+      ============================================================ */
+
+const chart = new Chart(document.getElementById("distanceChart"), {
   type: "line",
   data: {
     labels: [],
@@ -185,78 +226,118 @@ const chart = new Chart(ctx, {
         backgroundColor: "rgba(46,163,122,0.12)",
         tension: 0.35,
         fill: true,
-        pointRadius: 2,
       },
     ],
   },
   options: {
     responsive: true,
     maintainAspectRatio: false,
-    plugins: {
-      legend: { display: false },
-    },
     scales: {
-      y: { min: 0, max: 100, ticks: { stepSize: 20 } },
+      y: { min: 0, max: 100 },
     },
+    plugins: { legend: { display: false } },
   },
 });
 
+document.querySelector(".chart-wrap").style.height = "220px";
+
 function pushChartPoint(percent) {
-  const t = nowTime();
-  chart.data.labels.push(t);
+  chart.data.labels.push(nowTime());
   chart.data.datasets[0].data.push(percent);
 
   if (chart.data.labels.length > 12) {
     chart.data.labels.shift();
     chart.data.datasets[0].data.shift();
   }
+
   chart.update();
 }
 
-// Make chart area height stable
-document.querySelector(".chart-wrap").style.height = "220px";
+/* ============================================================
+      9. CLOUD COMMUNICATION
+      ============================================================ */
 
-// =================== ACTIONS ===================
-function handleManualSort(type) {
+// POST data to Adafruit feed
+async function sendToFeed(feed, value) {
+  await fetch(`${AIO_BASE}/${feed}/data`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-AIO-Key": AIO_KEY,
+    },
+    body: JSON.stringify({ value }),
+  });
+}
+
+// Fetch latest value from a feed
+async function fetchFeed(feedName) {
+  const res = await fetch(`${AIO_BASE}/${feedName}/data/last`, {
+    headers: { "X-AIO-Key": AIO_KEY },
+  });
+
+  if (!res.ok) throw new Error("Feed fetch failed");
+
+  return await res.json();
+}
+
+// Main polling function (runs every 5 seconds)
+async function fetchFromESP32() {
+  try {
+    const distanceData = await fetchFeed("distance");
+    const percentData = await fetchFeed("fill_percent");
+    const sensorData = await fetchFeed("sensor_ok");
+
+    distanceNow = parseInt(distanceData.value);
+    const percent = parseInt(percentData.value);
+    const sensorOk = parseInt(sensorData.value) === 1;
+
+    lastDataTimestamp = new Date(distanceData.created_at).getTime();
+
+    renderMetrics(percent, sensorOk);
+    pushChartPoint(percent);
+  } catch (err) {
+    console.error("Cloud fetch error:", err);
+    updateStatusUI("WARNING");
+  }
+}
+
+/* ============================================================
+      10. MANUAL SORTING
+      ============================================================ */
+
+async function handleManualSort(type) {
   lastSorted = type;
-  totalSorted += 1;
+  totalSorted++;
 
-  sortLog.unshift({ type, time: nowTime() });
-  renderMetrics();
-  renderSortLog();
+  const binMap = {
+    plastic: 1,
+    paper: 2,
+    other: 3,
+  };
 
-  // Later: send to ESP32
-  // sendSortCommand(type);
+  try {
+    await sendToFeed("waste_type", type);
+    await sendToFeed("target_bin", binMap[type]);
+
+    sortLog.unshift({
+      type,
+      time: nowTime(),
+    });
+
+    renderSortLog();
+  } catch (err) {
+    console.error("Sort command failed:", err);
+    updateStatusUI("WARNING");
+  }
 }
 
-/**
- * Called every 20 seconds (matches your professor guideline).
- * Later this becomes: distanceNow = await fetchDistanceFromESP32();
- */
-function sampleDistance() {
-  // MOCK behavior (replace later):
-  // Simulate random change in distance
-  const delta = Math.floor(Math.random() * 7) - 3; // -3..+3
-  distanceNow = clamp(distanceNow + delta, 5, 80);
+/* ============================================================
+      11. INITIALIZATION
+      ============================================================ */
 
-  const percent = distanceToPercent(distanceNow);
-  distanceLog.unshift({ distance: distanceNow, percent, time: nowTime() });
+// Start polling cloud every 5 seconds
+setInterval(fetchFromESP32, 5000);
+fetchFromESP32();
 
-  renderMetrics();
-  renderDistanceLog();
-  pushChartPoint(percent);
-
-  if (distanceLog.length > 20) distanceLog.pop();
-}
-
-// =================== ESP32 HOOKS (PLACEHOLDERS) ===================
-// When ready, implement these:
-// async function fetchDistanceFromESP32(){ ... }
-// async function sendSortCommand(type){ ... }
-
-// =================== INIT ===================
-renderMetrics();
-renderDistanceLog();
+// Initial UI state
 renderSortLog();
-sampleDistance(); // first sample immediately
-setInterval(sampleDistance, DISTANCE_LOG_INTERVAL_MS);
