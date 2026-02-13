@@ -1,25 +1,16 @@
-/* ============================================================
-   SMART BIN DASHBOARD - OUR DATAFLOW
-   ------------------------------------------------------------
-   here it:
-   - Fetches live data from Adafruit IO (ESP32 cloud)
-   - Updates UI (distance, percent, status)
-   - Sends manual sorting commands to ESP32
-   - Maintains logs and chart
-   ============================================================ */
+
 
 /* ============================================================
-   1. ADAFRUIT CLOUD CONFIGURATION
+   ADAFRUIT CLOUD CONFIGURATION
    ------------------------------------------------------------
    These values connect the dashboard to Adafruit IO.
-   Keep in mind that in real world cases the key should be hidden in backend.
    ============================================================ */
 
 const AIO_USERNAME = "username";
 const AIO_KEY = "Pass";
 const AIO_BASE = `https://io.adafruit.com/api/v2/${AIO_USERNAME}/feeds`;
 
-let lastDataTimestamp = 0; // used to detect stale data (future improvement)
+let lastDataTimestamp = 0;
 
 /* ============================================================
       2. OUR BIN CALIBRATION & SYSTEM THRESHOLDS
@@ -28,15 +19,12 @@ let lastDataTimestamp = 0; // used to detect stale data (future improvement)
       If we change bin size physically, we update these.
       ============================================================ */
 
-const EMPTY_DIST_CM = 60;
-const FULL_DIST_CM = 10;
+const EMPTY_DIST_CM = 30;
+const FULL_DIST_CM = 5;
 const FULL_THRESHOLD_PERCENT = 95;
 
 /* ============================================================
       3. DASHBOARD STATE (Frontend Memory)
-      ------------------------------------------------------------
-      These variables exist only in browser memory.
-      They reset when page reloads.
       ============================================================ */
 
 let totalSorted = 0;
@@ -48,8 +36,6 @@ let currentFilter = "all";
 
 /* ============================================================
       4. DOM REFERENCES
-      ------------------------------------------------------------
-      Cache all HTML elements once to avoid repeated lookups.
       ============================================================ */
 
 const elDistanceCm = document.getElementById("distanceCm");
@@ -211,7 +197,7 @@ function renderSortLog() {
 }
 
 /* ============================================================
-      8. CHART (FULLNESS OVER TIME)
+      8. CHART
       ============================================================ */
 
 const chart = new Chart(document.getElementById("distanceChart"), {
